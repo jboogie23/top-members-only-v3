@@ -13,12 +13,24 @@ function initializeLucia(D1: D1Database) {
     user: "users",
     session: "sessions",
   });
-  return new Lucia(adapter);
+  return new Lucia(adapter, {
+    sessionCookie: {
+      attributes: {
+        secure: false,
+      },
+    },
+    getUserAttributes: (attributes) => {
+      return {
+        email: attributes.email,
+      };
+    },
+  });
 }
 
 declare module "lucia" {
   interface Register {
     Lucia: ReturnType<typeof initializeLucia>;
+    DatabaseUserAttributes: DatabaseUserAttributes;
   }
 }
 

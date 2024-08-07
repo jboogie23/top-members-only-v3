@@ -4,4 +4,5 @@ Simple auth training using
 - Lucia auth library
 - Cloudflare D1 for storage user data and sessions
 - Cloudflare Workers for runtime
-  Following youtube video https://www.youtube.com/watch?v=ZD2Lt5GFo48&list=WL&index=5&t=29s
+
+Following youtube video https://youtu.be/ZD2Lt5GFo48?si=RZlPZ8tIBgXOLf9-&t=1355 @ 22:35
