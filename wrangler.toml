@@ -1,0 +1,21 @@
+name = "my-app"
+compatibility_date = "2024-08-07"
+
+# [vars]
+# MY_VAR = "my-variable"
+
+# [[kv_namespaces]]
+# binding = "MY_KV_NAMESPACE"
+# id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+# [[r2_buckets]]
+# binding = "MY_BUCKET"
+# bucket_name = "my-bucket"
+
+[[d1_databases]]
+binding = "DB" # i.e. available in your Worker on env.DB
+database_name = "top-members-only-v3"
+database_id = "aee06a86-d50d-4755-95b9-082a39908dfb"
+
+# [ai]
+# binding = "AI"
