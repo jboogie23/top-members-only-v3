@@ -7,6 +7,7 @@
   "dependencies": {
     "@hono/zod-validator": "^0.2.2",
     "@lucia-auth/adapter-sqlite": "^3.0.2",
+    "@noble/hashes": "^1.4.0",
     "hono": "^4.5.4",
     "lucia": "^3.2.0",
     "oslo": "^1.2.1",

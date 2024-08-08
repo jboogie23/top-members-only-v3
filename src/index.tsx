@@ -1,3 +1,4 @@
+// Imports
 import { Hono } from "hono";
 import type { FC } from "hono/jsx";
 import type { User, Session } from "lucia";
@@ -7,7 +8,11 @@ import { Lucia } from "lucia";
 import { D1Adapter } from "@lucia-auth/adapter-sqlite";
 import { csrf } from "hono/csrf";
 import { getCookie } from "hono/cookie";
+import { sha256 } from "@noble/hashes/sha256";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
+import { generateIdFromEntropySize } from "lucia";
 
+// Initialize the database lucia connections
 function initializeLucia(D1: D1Database) {
   const adapter = new D1Adapter(D1, {
     user: "users",
@@ -27,6 +32,25 @@ function initializeLucia(D1: D1Database) {
   });
 }
 
+// Utility function to hash password
+const hashPassword = (password: string): string => {
+  const passwordBytes = new TextEncoder().encode(password);
+  const hashedPassword = sha256(passwordBytes);
+  return bytesToHex(hashedPassword);
+};
+
+// Define the user attributes
+interface DatabaseUserAttributes {
+  email: string;
+}
+
+type UserRow = {
+  id: string;
+  email: string;
+  hashed_password: string;
+};
+
+// Extend the Lucia type
 declare module "lucia" {
   interface Register {
     Lucia: ReturnType<typeof initializeLucia>;
@@ -34,6 +58,7 @@ declare module "lucia" {
   }
 }
 
+// Layout view
 const Layout: FC = (props) => {
   return (
     <html>
@@ -72,10 +97,12 @@ const Layout: FC = (props) => {
   );
 };
 
+// Cloudflare TS binding
 type Bindings = {
   DB: D1Database;
 };
 
+// Hono app initialiser
 const app = new Hono<{
   Bindings: Bindings;
   Variables: {
@@ -84,8 +111,10 @@ const app = new Hono<{
   };
 }>();
 
+// CSRF protection
 app.use(csrf());
 
+// Session middleware
 app.use("*", async (c, next) => {
   const lucia = initializeLucia(c.env.DB);
   const sessionId = getCookie(c, lucia.sessionCookieName) ?? null;
@@ -111,6 +140,7 @@ app.use("*", async (c, next) => {
   return next();
 });
 
+// Homepage GET Routes
 app.get("/", (c) => {
   const user = c.get("user");
   if (user) {
@@ -133,6 +163,7 @@ app.get("/", (c) => {
   }
 });
 
+// Signup GET route
 app.get("/signup", (c) => {
   return c.html(
     <Layout>
@@ -151,6 +182,7 @@ app.get("/signup", (c) => {
   );
 });
 
+// Login GET route
 app.get("/login", (c) => {
   return c.html(
     <Layout>
@@ -169,6 +201,7 @@ app.get("/login", (c) => {
   );
 });
 
+// Signup POST route
 app.post(
   "/signup",
   zValidator(
@@ -178,11 +211,98 @@ app.post(
       password: z.string().min(1),
     })
   ),
-  (c) => {
+  async (c) => {
     const { email, password } = c.req.valid("form");
-    console.log(email);
+    const lucia = initializeLucia(c.env.DB);
+
+    const passwordHash = hashPassword(password);
+    const userId = generateIdFromEntropySize(10); // 16 characters long
+
+    try {
+      // insert user into DB
+      const insertedUser = await c.env.DB.prepare(
+        "INSERT INTO USERS (id, email, hashed_password) values (?, ?, ?) RETURNING *"
+      )
+        .bind(userId, email, passwordHash)
+        .first();
+      console.log("New user");
+      console.log(insertedUser);
+
+      // create session
+      const session = await lucia.createSession(userId, {});
+      const sessionCookie = lucia.createSessionCookie(session.id);
+
+      // set session cookie
+      c.header("Set-Cookie", sessionCookie.serialize(), {
+        append: true,
+      });
+
+      // redirect to home
+      return c.redirect("/");
+    } catch (error) {
+      console.error(error);
+      return c.body("Something went wrong", 400);
+    }
+  }
+);
+
+// Login POST route
+app.post(
+  "/login",
+  zValidator(
+    "form",
+    z.object({
+      email: z.string().email(),
+      password: z.string().min(1),
+    })
+  ),
+  async (c) => {
+    const { email, password } = c.req.valid("form");
+    const lucia = initializeLucia(c.env.DB);
+
+    const user = await c.env.DB.prepare("SELECT * FROM users WHERE email = ?")
+      .bind(email)
+      .first<UserRow>();
+
+    if (!user) {
+      return c.body("Invalid email", 400);
+    }
+
+    const passwordHash = hashPassword(password);
+
+    if (passwordHash !== user.hashed_password) {
+      return c.body("Invalid password", 400);
+    }
+
+    // create session
+    const session = await lucia.createSession(user.id, {});
+    const sessionCookie = lucia.createSessionCookie(session.id);
+
+    // set session cookie
+    c.header("Set-Cookie", sessionCookie.serialize(), {
+      append: true,
+    });
+
+    // redirect to home
     return c.redirect("/");
   }
 );
+
+// Logout POST route
+app.post("/logout", async (c) => {
+  const lucia = initializeLucia(c.env.DB);
+  // invalidate session
+  const session = c.get("session");
+  if (session) {
+    await lucia.invalidateSession(session.id);
+  }
+  const sessionCookie = lucia.createBlankSessionCookie();
+  // set session cookie
+  c.header("Set-Cookie", sessionCookie.serialize(), {
+    append: true,
+  });
+  // redirect to home
+  return c.redirect("/");
+});
 
 export default app;

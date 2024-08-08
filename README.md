@@ -5,4 +5,4 @@ Simple auth training using
 - Cloudflare D1 for storage user data and sessions
 - Cloudflare Workers for runtime
 
-Following youtube video https://youtu.be/ZD2Lt5GFo48?si=RZlPZ8tIBgXOLf9-&t=1355 @ 22:35
+Following youtube video https://youtu.be/ZD2Lt5GFo48?si=RZlPZ8tIBgXOLf9-&t=1355 @ 38:00 basic auth complete, about to start email verification.
