@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import type { FC } from "hono/jsx";
 import type { User, Session } from "lucia";
 import { zValidator } from "@hono/zod-validator";
-import { z } from "zod";
+import { string, z } from "zod";
 import { Lucia } from "lucia";
 import { D1Adapter } from "@lucia-auth/adapter-sqlite";
 import { csrf } from "hono/csrf";
@@ -11,6 +11,30 @@ import { getCookie } from "hono/cookie";
 import { sha256 } from "@noble/hashes/sha256";
 import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
 import { generateIdFromEntropySize } from "lucia";
+import { TimeSpan, createDate } from "oslo";
+import { generateRandomString, alphabet } from "oslo/crypto";
+import { isWithinExpirationDate } from "oslo";
+import { Resend } from "resend";
+
+// Email verification code
+async function generateEmailVerificationCode(
+  db: D1Database,
+  userId: string,
+  email: string
+): Promise<string> {
+  await db
+    .prepare("delete from email_verification_codes where user_id = ?")
+    .bind(userId)
+    .run();
+  const code = generateRandomString(4, alphabet("0-9"));
+  await db
+    .prepare(
+      "insert into email_verification_codes (user_id, email, code, expires_at) values (?, ?, ?, ?)"
+    )
+    .bind(userId, email, code, createDate(new TimeSpan(15, "m")).toString())
+    .run();
+  return code;
+}
 
 // Initialize the database lucia connections
 function initializeLucia(D1: D1Database) {
@@ -26,6 +50,7 @@ function initializeLucia(D1: D1Database) {
     },
     getUserAttributes: (attributes) => {
       return {
+        emailVerified: Boolean(attributes.email_verified),
         email: attributes.email,
       };
     },
@@ -42,12 +67,21 @@ const hashPassword = (password: string): string => {
 // Define the user attributes
 interface DatabaseUserAttributes {
   email: string;
+  email_verified: boolean;
 }
 
 type UserRow = {
   id: string;
   email: string;
   hashed_password: string;
+  email_verified: number;
+};
+
+type EmailVerificationCode = {
+  id: string;
+  code: string;
+  email: string;
+  expires_at: string;
 };
 
 // Extend the Lucia type
@@ -100,6 +134,7 @@ const Layout: FC = (props) => {
 // Cloudflare TS binding
 type Bindings = {
   DB: D1Database;
+  RESEND_API_KEY?: string;
 };
 
 // Hono app initialiser
@@ -110,6 +145,39 @@ const app = new Hono<{
     session: Session | null;
   };
 }>();
+
+// function to send emails
+const sendEmailOrLog = async (
+  env: Bindings,
+  recipient: string,
+  subject: string,
+  content: string
+) => {
+  if (env.RESEND_API_KEY) {
+    const resend = new Resend(env.RESEND_API_KEY);
+
+    try {
+      const data = await resend.emails.send({
+        from: "Buildkit <noreply@buildkit.app>",
+        to: [recipient],
+        subject: subject,
+        text: content,
+      });
+
+      console.log("Email sent successfully:", data);
+    } catch (error) {
+      console.error("Error sending email:", error);
+    }
+  } else {
+    console.log("Sending email (log only)");
+    console.log({
+      from: "Buildkit <noreply@buildkit.app>",
+      to: recipient,
+      subject: subject,
+      text: content,
+    });
+  }
+};
 
 // CSRF protection
 app.use(csrf());
@@ -146,7 +214,15 @@ app.get("/", (c) => {
   if (user) {
     return c.html(
       <Layout>
-        <div>Current user: {JSON.stringify(user)}</div>
+        {user.emailVerified ? (
+          <div>Current user: {JSON.stringify(user)}</div>
+        ) : (
+          <form method="POST" action="/email-verification">
+            <input name="code" />
+            <button>verify</button>
+          </form>
+        )}
+
         <form method="POST" action="/logout">
           <button>Logout</button>
         </form>
@@ -221,12 +297,27 @@ app.post(
     try {
       // insert user into DB
       const insertedUser = await c.env.DB.prepare(
-        "INSERT INTO USERS (id, email, hashed_password) values (?, ?, ?) RETURNING *"
+        "INSERT INTO USERS (id, email, hashed_password, email_verified) values (?, ?, ?, ?) RETURNING *"
       )
-        .bind(userId, email, passwordHash)
+        .bind(userId, email, passwordHash, false)
         .first();
       console.log("New user");
       console.log(insertedUser);
+
+      // send verification email
+      const verificationCode = await generateEmailVerificationCode(
+        c.env.DB,
+        userId,
+        email
+      );
+      console.log(verificationCode);
+
+      sendEmailOrLog(
+        c.env,
+        email,
+        "Welcome",
+        "Your verification code is: " + verificationCode
+      );
 
       // create session
       const session = await lucia.createSession(userId, {});
@@ -305,4 +396,70 @@ app.post("/logout", async (c) => {
   return c.redirect("/");
 });
 
+// function to verify email verification code
+async function verifyVerificationCode(
+  db: D1Database,
+  user: User,
+  code: string
+) {
+  // check if code is valid
+  const databaseCode = await db
+    .prepare(
+      "delete from email_verification_code where user_id = ? and code = ? and email = ? returning *"
+    )
+    .bind(user.id, code, user.email)
+    .first<EmailVerificationCode>();
+  if (!databaseCode) {
+    return false;
+  }
+
+  // check if code is expired
+  if (!isWithinExpirationDate(new Date(databaseCode.expires_at))) {
+    return false;
+  }
+  return true;
+}
+
+// email verification route
+app.post(
+  "/email-verification",
+  zValidator(
+    "form",
+    z.object({
+      code: z.string().min(1),
+    })
+  ),
+  async (c) => {
+    const user = c.get("user");
+    if (!user) {
+      return c.body("Invalid user", 400);
+    }
+    const { code } = c.req.valid("form");
+    if (!user) {
+      return c.body(null, 400);
+    }
+    const validCode = verifyVerificationCode(c.env.DB, user, code);
+    if (!validCode) {
+      return c.body(null, 400);
+    }
+    const lucia = initializeLucia(c.env.DB);
+    await lucia.invalidateUserSessions(user.id);
+    await c.env.DB.prepare(
+      "UPDATE users SET email_verified = true WHERE id = ?"
+    )
+      .bind(user.id)
+      .run();
+    // create session
+    const session = await lucia.createSession(user.id, {});
+    const sessionCookie = lucia.createSessionCookie(session.id);
+
+    // set session cookie
+    c.header("Set-Cookie", sessionCookie.serialize(), {
+      append: true,
+    });
+
+    // redirect to home
+    return c.redirect("/");
+  }
+);
 export default app;
